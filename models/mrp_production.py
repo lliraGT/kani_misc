@@ -38,8 +38,12 @@ class MrpProduction(models.Model):
         fixed_qty_per_batch = 41.0
         
         # Calculate how many batches we need to cover the total quantity
-        # (at least 5 batches, and at least enough to cover the total quantity with 41 units per batch)
+        # (at least 5 batches, always in multiples of 5, and at least enough to cover the total quantity with 41 units per batch)
         required_batches = ceil(self.product_qty / fixed_qty_per_batch)
+        # Round up to the next multiple of 5
+        if required_batches % 5 != 0:
+            required_batches = ((required_batches // 5) + 1) * 5
+            
         batches_needed = max(min_batches, required_batches)
         
         # Prepare the split quantities (all equal to fixed_qty_per_batch)
@@ -68,20 +72,27 @@ class MrpProduction(models.Model):
         return self._perform_fixed_split(split_quantities)
     
     def _perform_fixed_split(self, split_quantities):
-        """Split the production order into the specified quantities"""
+        """Split the production order into the specified quantities with proper component quantities"""
         self.ensure_one()
         
         # We'll create the new productions manually
         new_production_ids = []
         main_production = self
+        original_qty = main_production.product_qty
         
         # Create production orders for all quantities except the last one
         for i, qty in enumerate(split_quantities[:-1]):
             # Copy the original production
             new_production = main_production.copy({
                 'product_qty': qty,
-                'name': f"{main_production.name}.{i+1}",
+                'name': f"{main_production.name}-{str(i+1).zfill(3)}",
             })
+            
+            # Update the move_raw_ids to have the correct component quantities
+            # This is critical to ensure each split MO has the correct ingredient quantities
+            ratio = qty / original_qty
+            for move in new_production.move_raw_ids:
+                move.product_uom_qty = move.product_uom_qty * ratio
             
             # Add to our list of new productions
             new_production_ids.append(new_production.id)
@@ -89,8 +100,13 @@ class MrpProduction(models.Model):
         # Update the original production with the last quantity
         main_production.write({
             'product_qty': split_quantities[-1],
-            'name': f"{main_production.name}.{len(split_quantities)}",
+            'name': f"{main_production.name}-{str(len(split_quantities)).zfill(3)}",
         })
+        
+        # Also update component quantities for the main production (now the last batch)
+        ratio = split_quantities[-1] / original_qty
+        for move in main_production.move_raw_ids:
+            move.product_uom_qty = move.product_uom_qty * ratio
         
         # Add the main production to the list of productions
         new_production_ids.append(main_production.id)
